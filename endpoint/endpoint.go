@@ -230,8 +230,14 @@ func NewEndpoint(dnsName, recordType string, targets ...string) *Endpoint {
 // NewEndpointWithTTL initialization method to be used to create an endpoint with a TTL struct
 func NewEndpointWithTTL(dnsName, recordType string, ttl TTL, targets ...string) *Endpoint {
 	cleanTargets := make([]string, len(targets))
-	for idx, target := range targets {
-		cleanTargets[idx] = strings.TrimSuffix(target, ".")
+	if recordType == RecordTypeNAPTR {
+		for idx, target := range targets {
+			cleanTargets[idx] = target
+		}
+	} else {
+		for idx, target := range targets {
+			cleanTargets[idx] = strings.TrimSuffix(target, ".")
+		}
 	}
 
 	for _, label := range strings.Split(dnsName, ".") {
