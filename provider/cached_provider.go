@@ -13,24 +13,24 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package provider
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/pkg/metrics"
 	"sigs.k8s.io/external-dns/plan"
 )
 
 var (
-	cachedRecordsCallsTotal = prometheus.NewCounterVec(
+	cachedRecordsCallsTotal = metrics.NewCounterVecWithOpts(
 		prometheus.CounterOpts{
-			Namespace: "external_dns",
 			Subsystem: "provider",
 			Name:      "cache_records_calls",
 			Help:      "Number of calls to the provider cache Records list.",
@@ -39,17 +39,19 @@ var (
 			"from_cache",
 		},
 	)
-	cachedApplyChangesCallsTotal = prometheus.NewCounter(
+	cachedApplyChangesCallsTotal = metrics.NewCounterWithOpts(
 		prometheus.CounterOpts{
-			Namespace: "external_dns",
 			Subsystem: "provider",
 			Name:      "cache_apply_changes_calls",
 			Help:      "Number of calls to the provider cache ApplyChanges.",
 		},
 	)
-
-	registerCacheProviderMetrics = sync.Once{}
 )
+
+func init() {
+	metrics.RegisterMetric.MustRegister(cachedRecordsCallsTotal)
+	metrics.RegisterMetric.MustRegister(cachedApplyChangesCallsTotal)
+}
 
 type CachedProvider struct {
 	Provider
@@ -59,9 +61,6 @@ type CachedProvider struct {
 }
 
 func NewCachedProvider(provider Provider, refreshDelay time.Duration) *CachedProvider {
-	registerCacheProviderMetrics.Do(func() {
-		prometheus.MustRegister(cachedRecordsCallsTotal)
-	})
 	return &CachedProvider{
 		Provider:     provider,
 		RefreshDelay: refreshDelay,
@@ -78,10 +77,10 @@ func (c *CachedProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, err
 		}
 		c.cache = records
 		c.lastRead = time.Now()
-		cachedRecordsCallsTotal.WithLabelValues("false").Inc()
+		cachedRecordsCallsTotal.CounterVec.WithLabelValues("false").Inc()
 	} else {
 		log.Debug("Records cache provider: using records list from cache")
-		cachedRecordsCallsTotal.WithLabelValues("true").Inc()
+		cachedRecordsCallsTotal.CounterVec.WithLabelValues("true").Inc()
 	}
 	return c.cache, nil
 }
@@ -91,7 +90,7 @@ func (c *CachedProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 		return nil
 	}
 	c.Reset()
-	cachedApplyChangesCallsTotal.Inc()
+	cachedApplyChangesCallsTotal.Counter.Inc()
 	return c.Provider.ApplyChanges(ctx, changes)
 }
 

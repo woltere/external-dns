@@ -81,7 +81,7 @@ spec:
     spec:
       containers:
         - name: external-dns
-          image: registry.k8s.io/external-dns/external-dns:v0.15.1
+          image: registry.k8s.io/external-dns/external-dns:v0.19.0
           args:
             - --source=service
             - --source=ingress
@@ -111,7 +111,7 @@ spec:
 
 ## Validate ExternalDNS works
 
-Create either a [Service](../tutorials/aws.md#verify-externaldns-works-service-example) or an [Ingress](../tutorials/aws.md#verify-externaldns-works-ingress-example) and 
+Create either a [Service](../tutorials/aws.md#verify-externaldns-works-service-example) or an [Ingress](../tutorials/aws.md#verify-externaldns-works-ingress-example) and
 
 After roughly two minutes, check that the corresponding entry was created in the DynamoDB table:
 
@@ -120,7 +120,8 @@ aws dynamodb scan --table-name external-dns
 ```
 
 This will show something like:
-```
+
+```json
 {
     "Items": [
         {

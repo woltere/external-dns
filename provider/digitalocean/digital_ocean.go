@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/digitalocean/godo"
@@ -34,8 +33,8 @@ import (
 )
 
 const (
-	// digitalOceanRecordTTL is the default TTL value
-	digitalOceanRecordTTL = 300
+	// defaultTTL is the default TTL value
+	defaultTTL = 300
 )
 
 // DigitalOceanProvider is an implementation of Provider for Digital Ocean's DNS.
@@ -43,7 +42,7 @@ type DigitalOceanProvider struct {
 	provider.BaseProvider
 	Client godo.DomainsService
 	// only consider hosted zones managing domains ending in this suffix
-	domainFilter endpoint.DomainFilter
+	domainFilter *endpoint.DomainFilter
 	// page size when querying paginated APIs
 	apiPageSize int
 	DryRun      bool
@@ -77,7 +76,7 @@ func (c *digitalOceanChanges) Empty() bool {
 }
 
 // NewDigitalOceanProvider initializes a new DigitalOcean DNS based Provider.
-func NewDigitalOceanProvider(ctx context.Context, domainFilter endpoint.DomainFilter, dryRun bool, apiPageSize int) (*DigitalOceanProvider, error) {
+func NewDigitalOceanProvider(ctx context.Context, domainFilter *endpoint.DomainFilter, dryRun bool, apiPageSize int) (*DigitalOceanProvider, error) {
 	token, ok := os.LookupEnv("DO_TOKEN")
 	if !ok {
 		return nil, fmt.Errorf("no token found")
@@ -85,7 +84,7 @@ func NewDigitalOceanProvider(ctx context.Context, domainFilter endpoint.DomainFi
 	oauthClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{
 		AccessToken: token,
 	}))
-	client, err := godo.New(oauthClient, godo.SetUserAgent("ExternalDNS/"+externaldns.Version))
+	client, err := godo.New(oauthClient, godo.SetUserAgent(externaldns.UserAgent()))
 	if err != nil {
 		return nil, err
 	}
@@ -302,20 +301,19 @@ func makeDomainEditRequest(domain, name, recordType, data string, ttl int) *godo
 	}
 
 	if recordType == endpoint.RecordTypeMX {
-		priority, domain, err := parseMxTarget(data)
-		if err == nil {
-			request.Priority = int(priority)
-			request.Data = provider.EnsureTrailingDot(domain)
-		} else {
+		mxRecord, err := endpoint.NewMXRecord(data)
+		if err != nil {
 			log.WithFields(log.Fields{
 				"domain":     domain,
 				"dnsName":    name,
 				"recordType": recordType,
 				"data":       data,
 			}).Warn("Unable to parse MX target")
+			return request
 		}
+		request.Priority = int(*mxRecord.GetPriority())
+		request.Data = provider.EnsureTrailingDot(*mxRecord.GetHost())
 	}
-
 	return request
 }
 
@@ -397,7 +395,7 @@ func getTTLFromEndpoint(ep *endpoint.Endpoint) int {
 	if ep.RecordTTL.IsConfigured() {
 		return int(ep.RecordTTL)
 	}
-	return digitalOceanRecordTTL
+	return defaultTTL
 }
 
 func endpointsByZone(zoneNameIDMapper provider.ZoneIDName, endpoints []*endpoint.Endpoint) map[string][]*endpoint.Endpoint {
@@ -660,19 +658,4 @@ func (p *DigitalOceanProvider) ApplyChanges(ctx context.Context, planChanges *pl
 	}
 
 	return p.submitChanges(ctx, &changes)
-}
-
-func parseMxTarget(mxTarget string) (priority int64, exchange string, err error) {
-	targetParts := strings.SplitN(mxTarget, " ", 2)
-	if len(targetParts) != 2 {
-		return priority, exchange, fmt.Errorf("mx target needs to be of form '10 example.com'")
-	}
-
-	priorityRaw, exchange := targetParts[0], targetParts[1]
-	priority, err = strconv.ParseInt(priorityRaw, 10, 32)
-	if err != nil {
-		return priority, exchange, fmt.Errorf("invalid priority specified")
-	}
-
-	return priority, exchange, nil
 }

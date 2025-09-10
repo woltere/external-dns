@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"k8s.io/utils/set"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/external-dns/pkg/events"
 )
 
 const (
@@ -48,6 +50,19 @@ const (
 	RecordTypeNAPTR = "NAPTR"
 )
 
+var (
+	KnownRecordTypes = []string{
+		RecordTypeA,
+		RecordTypeAAAA,
+		RecordTypeTXT,
+		RecordTypeSRV,
+		RecordTypeNS,
+		RecordTypePTR,
+		RecordTypeMX,
+		RecordTypeNAPTR,
+	}
+)
+
 // TTL is a structure defining the TTL of a DNS record
 type TTL int64
 
@@ -59,11 +74,16 @@ func (ttl TTL) IsConfigured() bool {
 // Targets is a representation of a list of targets for an endpoint.
 type Targets []string
 
-// NewTargets is a convenience method to create a new Targets object from a vararg of strings
+// MXTarget represents a single MX (Mail Exchange) record target, including its priority and host.
+type MXTarget struct {
+	priority uint16
+	host     string
+}
+
+// NewTargets is a convenience method to create a new Targets object from a vararg of strings.
+// Returns a new Targets slice with duplicates removed and elements sorted in order.
 func NewTargets(target ...string) Targets {
-	t := make(Targets, 0, len(target))
-	t = append(t, target...)
-	return t
+	return set.New(target...).SortedList()
 }
 
 func (t Targets) String() string {
@@ -92,7 +112,7 @@ func (t Targets) Swap(i, j int) {
 	t[i], t[j] = t[j], t[i]
 }
 
-// Same compares to Targets and returns true if they are identical (case-insensitive)
+// Same compares two Targets and returns true if they are identical (case-insensitive)
 func (t Targets) Same(o Targets) bool {
 	if len(t) != len(o) {
 		return false
@@ -200,9 +220,11 @@ type EndpointKey struct {
 	DNSName       string
 	RecordType    string
 	SetIdentifier string
+	RecordTTL     TTL
 }
 
 // Endpoint is a high-level way of a connection between a service and an IP
+// +kubebuilder:object:generate=true
 type Endpoint struct {
 	// The hostname of the DNS record
 	DNSName string `json:"dnsName,omitempty"`
@@ -220,6 +242,9 @@ type Endpoint struct {
 	// ProviderSpecific stores provider specific config
 	// +optional
 	ProviderSpecific ProviderSpecific `json:"providerSpecific,omitempty"`
+	// refObject stores reference object
+	// +optional
+	refObject *events.ObjectReference
 }
 
 // NewEndpoint initialization method to be used to create an endpoint
@@ -240,7 +265,7 @@ func NewEndpointWithTTL(dnsName, recordType string, ttl TTL, targets ...string) 
 		}
 	}
 
-	for _, label := range strings.Split(dnsName, ".") {
+	for label := range strings.SplitSeq(dnsName, ".") {
 		if len(label) > 63 {
 			log.Errorf("label %s in %s is longer than 63 characters. Cannot create endpoint", label, dnsName)
 			return nil
@@ -307,6 +332,30 @@ func (e *Endpoint) DeleteProviderSpecificProperty(key string) {
 	}
 }
 
+// WithLabel adds or updates a label for the Endpoint.
+//
+// Example usage:
+//
+//	ep.WithLabel("owner", "user123")
+func (e *Endpoint) WithLabel(key, value string) *Endpoint {
+	if e.Labels == nil {
+		e.Labels = NewLabels()
+	}
+	e.Labels[key] = value
+	return e
+}
+
+// WithRefObject sets the reference object for the Endpoint and returns the Endpoint.
+// This can be used to associate the Endpoint with a specific Kubernetes object.
+func (e *Endpoint) WithRefObject(obj *events.ObjectReference) *Endpoint {
+	e.refObject = obj
+	return e
+}
+
+func (e *Endpoint) RefObject() *events.ObjectReference {
+	return e.refObject
+}
+
 // Key returns the EndpointKey of the Endpoint.
 func (e *Endpoint) Key() EndpointKey {
 	return EndpointKey{
@@ -326,60 +375,26 @@ func (e *Endpoint) String() string {
 	return fmt.Sprintf("%s %d IN %s %s %s %s", e.DNSName, e.RecordTTL, e.RecordType, e.SetIdentifier, e.Targets, e.ProviderSpecific)
 }
 
-// Apply filter to slice of endpoints and return new filtered slice that includes
+func (e *Endpoint) Describe() string {
+	return fmt.Sprintf("record:%s, owner:%s, type:%s, targets:%s", e.DNSName, e.SetIdentifier, e.RecordType, strings.Join(e.Targets, ", "))
+}
+
+// FilterEndpointsByOwnerID Apply filter to slice of endpoints and return new filtered slice that includes
 // only endpoints that match.
 func FilterEndpointsByOwnerID(ownerID string, eps []*Endpoint) []*Endpoint {
 	filtered := []*Endpoint{}
 	for _, ep := range eps {
-		if endpointOwner, ok := ep.Labels[OwnerLabelKey]; !ok || endpointOwner != ownerID {
-			log.Debugf(`Skipping endpoint %v because owner id does not match, found: "%s", required: "%s"`, ep, endpointOwner, ownerID)
+		endpointOwner, ok := ep.Labels[OwnerLabelKey]
+		if !ok {
+			log.Debugf(`Skipping endpoint %v because of missing owner label (required: "%s")`, ep, ownerID)
+		} else if endpointOwner != ownerID {
+			log.Debugf(`Skipping endpoint %v because owner id does not match (found: "%s", required: "%s")`, ep, endpointOwner, ownerID)
 		} else {
 			filtered = append(filtered, ep)
 		}
 	}
 
 	return filtered
-}
-
-// DNSEndpointSpec defines the desired state of DNSEndpoint
-type DNSEndpointSpec struct {
-	Endpoints []*Endpoint `json:"endpoints,omitempty"`
-}
-
-// DNSEndpointStatus defines the observed state of DNSEndpoint
-type DNSEndpointStatus struct {
-	// The generation observed by the external-dns controller.
-	// +optional
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-}
-
-// +genclient
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-
-// DNSEndpoint is a contract that a user-specified CRD must implement to be used as a source for external-dns.
-// The user-specified CRD should also have the status sub-resource.
-// +k8s:openapi-gen=true
-// +groupName=externaldns.k8s.io
-// +kubebuilder:resource:path=dnsendpoints
-// +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
-// +kubebuilder:metadata:annotations="api-approved.kubernetes.io=https://github.com/kubernetes-sigs/external-dns/pull/2007"
-// +versionName=v1alpha1
-
-type DNSEndpoint struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-
-	Spec   DNSEndpointSpec   `json:"spec,omitempty"`
-	Status DNSEndpointStatus `json:"status,omitempty"`
-}
-
-// +kubebuilder:object:root=true
-// DNSEndpointList is a list of DNSEndpoint objects
-type DNSEndpointList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DNSEndpoint `json:"items"`
 }
 
 // RemoveDuplicates returns a slice holding the unique endpoints.
@@ -401,4 +416,77 @@ func RemoveDuplicates(endpoints []*Endpoint) []*Endpoint {
 	}
 
 	return result
+}
+
+// CheckEndpoint Check if endpoint is properly formatted according to RFC standards
+func (e *Endpoint) CheckEndpoint() bool {
+	switch recordType := e.RecordType; recordType {
+	case RecordTypeMX:
+		return e.Targets.ValidateMXRecord()
+	case RecordTypeSRV:
+		return e.Targets.ValidateSRVRecord()
+	}
+	return true
+}
+
+// NewMXRecord parses a string representation of an MX record target (e.g., "10 mail.example.com")
+// and returns an MXTarget struct. Returns an error if the input is invalid.
+func NewMXRecord(target string) (*MXTarget, error) {
+	parts := strings.Fields(strings.TrimSpace(target))
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid MX record target: %s. MX records must have a preference value and a host, e.g. '10 example.com'", target)
+	}
+
+	priority, err := strconv.ParseUint(parts[0], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid integer value in target: %s", target)
+	}
+
+	return &MXTarget{
+		priority: uint16(priority),
+		host:     parts[1],
+	}, nil
+}
+
+// GetPriority returns the priority of the MX record target.
+func (m *MXTarget) GetPriority() *uint16 {
+	return &m.priority
+}
+
+// GetHost returns the host of the MX record target.
+func (m *MXTarget) GetHost() *string {
+	return &m.host
+}
+
+func (t Targets) ValidateMXRecord() bool {
+	for _, target := range t {
+		_, err := NewMXRecord(target)
+		if err != nil {
+			log.Debugf("Invalid MX record target: %s. %v", target, err)
+			return false
+		}
+	}
+
+	return true
+}
+
+func (t Targets) ValidateSRVRecord() bool {
+	for _, target := range t {
+		// SRV records must have a priority, weight, and port value, e.g. "10 5 5060 example.com"
+		// as per https://www.rfc-editor.org/rfc/rfc2782.txt
+		targetParts := strings.Fields(strings.TrimSpace(target))
+		if len(targetParts) != 4 {
+			log.Debugf("Invalid SRV record target: %s. SRV records must have a priority, weight, and port value, e.g. '10 5 5060 example.com'", target)
+			return false
+		}
+
+		for _, part := range targetParts[:3] {
+			_, err := strconv.ParseUint(part, 10, 16)
+			if err != nil {
+				log.Debugf("Invalid SRV record target: %s. Invalid integer value in target.", target)
+				return false
+			}
+		}
+	}
+	return true
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
+
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/internal/testutils"
 	"sigs.k8s.io/external-dns/plan"
@@ -61,10 +62,49 @@ func TestDynamoDBRegistryNew(t *testing.T) {
 	require.EqualError(t, err, "table cannot be empty")
 
 	_, err = NewDynamoDBRegistry(p, "test-owner", api, "test-table", "", "", "", []string{}, []string{}, []byte(";k&l)nUC/33:{?d{3)54+,AD?]SX%yh^x"), time.Hour)
-	require.EqualError(t, err, "the AES Encryption key must have a length of 32 bytes")
+	require.EqualError(t, err, "the AES Encryption key must be 32 bytes long, in either plain text or base64-encoded format")
 
 	_, err = NewDynamoDBRegistry(p, "test-owner", api, "test-table", "testPrefix", "testSuffix", "", []string{}, []string{}, []byte(""), time.Hour)
 	require.EqualError(t, err, "txt-prefix and txt-suffix are mutually exclusive")
+}
+
+func TestDynamoDBRegistryNew_EncryptionConfig(t *testing.T) {
+	api, p := newDynamoDBAPIStub(t, nil)
+
+	tests := []struct {
+		encEnabled      bool
+		aesKeyRaw       []byte
+		aesKeySanitized []byte
+		errorExpected   bool
+	}{
+		{
+			encEnabled:      true,
+			aesKeyRaw:       []byte("123456789012345678901234567890asdfasdfasdfasdfa12"),
+			aesKeySanitized: []byte{},
+			errorExpected:   true,
+		},
+		{
+			encEnabled:      true,
+			aesKeyRaw:       []byte("passphrasewhichneedstobe32bytes!"),
+			aesKeySanitized: []byte("passphrasewhichneedstobe32bytes!"),
+			errorExpected:   false,
+		},
+		{
+			encEnabled:      true,
+			aesKeyRaw:       []byte("ZPitL0NGVQBZbTD6DwXJzD8RiStSazzYXQsdUowLURY="),
+			aesKeySanitized: []byte{100, 248, 173, 47, 67, 70, 85, 0, 89, 109, 48, 250, 15, 5, 201, 204, 63, 17, 137, 43, 82, 107, 60, 216, 93, 11, 29, 82, 140, 11, 81, 22},
+			errorExpected:   false,
+		},
+	}
+	for _, test := range tests {
+		actual, err := NewDynamoDBRegistry(p, "test-owner", api, "test-table", "", "", "", []string{}, []string{}, test.aesKeyRaw, time.Hour)
+		if test.errorExpected {
+			require.Error(t, err)
+		} else {
+			require.NoError(t, err)
+			assert.Equal(t, test.aesKeySanitized, actual.txtEncryptAESKey)
+		}
+	}
 }
 
 func TestDynamoDBRegistryRecordsBadTable(t *testing.T) {
@@ -210,7 +250,7 @@ func TestDynamoDBRegistryRecords(t *testing.T) {
 	})
 
 	records, err := r.Records(ctx)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	assert.True(t, testutils.SameEndpoints(records, expectedRecords))
 }
@@ -1041,11 +1081,11 @@ func TestDynamoDBRegistryApplyChanges(t *testing.T) {
 
 			r, _ := NewDynamoDBRegistry(p, "test-owner", api, "test-table", "txt.", "", "", []string{}, []string{}, nil, time.Hour)
 			_, err := r.Records(ctx)
-			require.Nil(t, err)
+			require.NoError(t, err)
 
 			err = r.ApplyChanges(ctx, &tc.changes)
 			if tc.expectedError == "" {
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 			} else {
 				assert.EqualError(t, err, tc.expectedError)
 			}
@@ -1054,12 +1094,12 @@ func TestDynamoDBRegistryApplyChanges(t *testing.T) {
 			assert.Empty(t, tc.stubConfig.ExpectDelete, "all expected deletions made")
 
 			records, err := r.Records(ctx)
-			require.Nil(t, err)
+			require.NoError(t, err)
 			assert.True(t, testutils.SameEndpoints(records, tc.expectedRecords))
 
 			r.recordsCache = nil
 			records, err = r.Records(ctx)
-			require.Nil(t, err)
+			require.NoError(t, err)
 			assert.True(t, testutils.SameEndpoints(records, tc.expectedRecords))
 			if tc.expectedError == "" {
 				assert.Empty(t, r.orphanedLabels)
@@ -1146,7 +1186,7 @@ func (r *DynamoDBStub) Scan(ctx context.Context, input *dynamodb.ScanInput, opts
 	assert.Equal(r.t, "o = :ownerval", *input.FilterExpression)
 	assert.Len(r.t, input.ExpressionAttributeValues, 1)
 	var owner string
-	assert.Nil(r.t, attributevalue.Unmarshal(input.ExpressionAttributeValues[":ownerval"], &owner))
+	assert.NoError(r.t, attributevalue.Unmarshal(input.ExpressionAttributeValues[":ownerval"], &owner))
 	assert.Equal(r.t, "test-owner", owner)
 	assert.Equal(r.t, "k,l", *input.ProjectionExpression)
 	assert.True(r.t, *input.ConsistentRead)
@@ -1194,12 +1234,12 @@ func (r *DynamoDBStub) BatchExecuteStatement(context context.Context, input *dyn
 			assert.True(r.t, r.changesApplied, "unexpected delete before provider changes")
 
 			var key string
-			assert.Nil(r.t, attributevalue.Unmarshal(statement.Parameters[0], &key))
+			require.NoError(r.t, attributevalue.Unmarshal(statement.Parameters[0], &key))
 			assert.True(r.t, r.stubConfig.ExpectDelete.Has(key), "unexpected delete for key %q", key)
 			r.stubConfig.ExpectDelete.Delete(key)
 
 			var testOwner string
-			assert.Nil(r.t, attributevalue.Unmarshal(statement.Parameters[1], &testOwner))
+			assert.NoError(r.t, attributevalue.Unmarshal(statement.Parameters[1], &testOwner))
 			assert.Equal(r.t, "test-owner", testOwner)
 
 			responses = append(responses, dynamodbtypes.BatchStatementResponse{})
@@ -1208,8 +1248,8 @@ func (r *DynamoDBStub) BatchExecuteStatement(context context.Context, input *dyn
 			assert.False(r.t, r.changesApplied, "unexpected insert after provider changes")
 
 			var key string
-			assert.Nil(r.t, attributevalue.Unmarshal(statement.Parameters[0], &key))
-			if code, exists := r.stubConfig.ExpectInsertError[key]; exists {
+			assert.NoError(r.t, attributevalue.Unmarshal(statement.Parameters[0], &key))
+			if code, ok := r.stubConfig.ExpectInsertError[key]; ok {
 				delete(r.stubConfig.ExpectInsertError, key)
 				responses = append(responses, dynamodbtypes.BatchStatementResponse{
 					Error: &dynamodbtypes.BatchStatementError{
@@ -1225,12 +1265,12 @@ func (r *DynamoDBStub) BatchExecuteStatement(context context.Context, input *dyn
 			delete(r.stubConfig.ExpectInsert, key)
 
 			var testOwner string
-			assert.Nil(r.t, attributevalue.Unmarshal(statement.Parameters[1], &testOwner))
+			require.NoError(r.t, attributevalue.Unmarshal(statement.Parameters[1], &testOwner))
 			assert.Equal(r.t, "test-owner", testOwner)
 
 			var labels map[string]string
 			err := attributevalue.Unmarshal(statement.Parameters[2], &labels)
-			assert.Nil(r.t, err)
+			assert.NoError(r.t, err)
 
 			for label, value := range labels {
 				expectedValue, found := expectedLabels[label]
@@ -1249,7 +1289,7 @@ func (r *DynamoDBStub) BatchExecuteStatement(context context.Context, input *dyn
 			assert.False(r.t, r.changesApplied, "unexpected update after provider changes")
 
 			var key string
-			assert.Nil(r.t, attributevalue.Unmarshal(statement.Parameters[1], &key))
+			assert.NoError(r.t, attributevalue.Unmarshal(statement.Parameters[1], &key))
 			if code, exists := r.stubConfig.ExpectUpdateError[key]; exists {
 				delete(r.stubConfig.ExpectInsertError, key)
 				responses = append(responses, dynamodbtypes.BatchStatementResponse{
@@ -1266,7 +1306,7 @@ func (r *DynamoDBStub) BatchExecuteStatement(context context.Context, input *dyn
 			delete(r.stubConfig.ExpectUpdate, key)
 
 			var labels map[string]string
-			assert.Nil(r.t, attributevalue.Unmarshal(statement.Parameters[0], &labels))
+			assert.NoError(r.t, attributevalue.Unmarshal(statement.Parameters[0], &labels))
 
 			for label, value := range labels {
 				expectedValue, found := expectedLabels[label]

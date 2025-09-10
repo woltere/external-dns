@@ -4,25 +4,25 @@ ExternalDNS sources support a number of annotations on the Kubernetes resources 
 
 The following table documents which sources support which annotations:
 
-| Source       | controller | hostname | internal-hostname | target  | ttl     | (provider-specific) |
-|--------------|------------|----------|-------------------|---------|---------|---------------------|
-| Ambassador   |            |          |                   | Yes     | Yes     | Yes                 |
-| Connector    |            |          |                   |         |         |                     |
-| Contour      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| CloudFoundry |            |          |                   |         |         |                     |
-| CRD          |            |          |                   |         |         |                     |
-| F5           |            |          |                   | Yes     | Yes     |                     |
-| Gateway      | Yes        | Yes[^1]  |                   | Yes[^4] | Yes     | Yes                 |
-| Gloo         |            |          |                   | Yes     | Yes[^5] | Yes[^5]             |
-| Ingress      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Istio        | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Kong         |            | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Node         | Yes        |          |                   | Yes     | Yes     |                     |
-| OpenShift    | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Pod          |            | Yes      | Yes               | Yes     |         |                     |
-| Service      | Yes        | Yes[^1]  | Yes[^1][^2]       | Yes[^3] | Yes     | Yes                 |
-| Skipper      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
-| Traefik      |            | Yes[^1]  |                   | Yes     | Yes     | Yes                 |
+| Source       | controller | hostname | internal-hostname | target  | ttl     | (provider-specific) | ingress |
+|--------------|------------|----------|-------------------|---------|---------|---------------------|:-------:|
+| Ambassador   |            |          |                   | Yes     | Yes     | Yes                 |   No    |
+| Connector    |            |          |                   |         |         |                     |   No    |
+| Contour      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   No    |
+| CloudFoundry |            |          |                   |         |         |                     |   No    |
+| CRD          |            |          |                   |         |         |                     |   No    |
+| F5           |            |          |                   | Yes     | Yes     |                     |   No    |
+| Gateway      | Yes        | Yes[^1]  |                   | Yes[^4] | Yes     | Yes                 |   No    |
+| Gloo         |            |          |                   | Yes     | Yes[^5] | Yes[^5]             |   No    |
+| Ingress      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   No    |
+| Istio        | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   Yes   |
+| Kong         |            | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   No    |
+| Node         | Yes        |          |                   | Yes     | Yes     |                     |   No    |
+| OpenShift    | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   No    |
+| Pod          |            | Yes      | Yes               | Yes     |         |                     |   No    |
+| Service      | Yes        | Yes[^1]  | Yes[^1][^2]       | Yes[^3] | Yes     | Yes                 |   No    |
+| Skipper      | Yes        | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   No    |
+| Traefik      |            | Yes[^1]  |                   | Yes     | Yes     | Yes                 |   No    |
 
 [^1]: Unless the `--ignore-hostname-annotation` flag is specified.
 [^2]: Only behaves differently than `hostname` for `Service`s of type `ClusterIP` or `LoadBalancer`.
@@ -59,10 +59,79 @@ Otherwise, use the `IP` of each of the `Service`'s `Endpoints`'s `Addresses`.
 
 ## external-dns.alpha.kubernetes.io/hostname
 
-Specifies the domain for the resource's DNS records. 
+Specifies the domain for the resource's DNS records.
 
 Multiple hostnames can be specified through a comma-separated list, e.g.
 `svc.mydomain1.com,svc.mydomain2.com`.
+
+For `Pods`, uses the `Pod`'s `Status.PodIP`, unless they are `hostNetwork: true` in which case the NodeExternalIP is used for IPv4 and NodeInternalIP for IPv6.
+
+Notes:
+
+- This annotation `overrides` any automatically derived hostnames (e.g., from Ingress.spec.rules[].host).
+- Hostnames must match the domain filter set in ExternalDNS (e.g., --domain-filter=example.com).
+- This is an alpha annotation — subject to change; newer versions may support alternatives or deprecate it.
+- This annotation is helpful for:
+  - Services or other resources without native hostname fields.
+  - Explicit overrides or multi-host situations.
+  - Avoiding reliance on auto-detection or heuristics.
+
+### Use Cases for `external-dns.alpha.kubernetes.io/hostname` annotation
+
+#### Explicit Hostname Mapping for Services
+
+You have a Service (e.g. of type LoadBalancer or ClusterIP) and want to expose it under a custom DNS name:
+
+```yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: app.example.com
+spec:
+  type: LoadBalancer
+  ...
+```
+
+> ExternalDNS will create a A or CNAME record for app.example.com pointing to the external IP or hostname of the service.
+
+#### Multi-Hostname Records
+
+You can assign multiple hostnames by separating them with commas:
+
+```yml
+annotations:
+  external-dns.alpha.kubernetes.io/hostname: api.example.com,api.internal.example.com
+```
+
+> ExternalDNS will create two DNS records for the same service.
+
+#### Static DNS Assignment Without Ingress Rules
+
+When using Ingress, you usually declare hostnames in the spec.rules[].host. But with this annotation, you can manage DNS independently:
+
+```yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-ingress
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: www.example.com
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-service
+                port:
+                  number: 80
+```
+
+> Useful when DNS management is decoupled from routing logic.
 
 ## external-dns.alpha.kubernetes.io/ingress-hostname-source
 
@@ -74,13 +143,24 @@ If the value is `annotation-only`, use only the domains from the `Ingress` annot
 
 If the annotation is not present, use the domains from both the spec and annotations.
 
+## external-dns.alpha.kubernetes.io/ingress
+
+This annotation allows ExternalDNS to work with Istio Gateways that don't have a public IP.
+
+It can be used to address a specific architectural pattern, when a Kubernetes Ingress directs all public traffic to the Istio Gateway:
+
+- **The Challenge**: By default, ExternalDNS sources the public IP address for a DNS record from a Service of type LoadBalancer.
+However, in some service mesh setups, the Istio Gateway's Service is of type ClusterIP, with all public traffic routed to it via a separate Kubernetes Ingress object. This setup leaves the Gateway without a public IP that ExternalDNS can discover.
+
+- **The Solution**: The annotation on the Istio Gateway tells ExternalDNS to ignore the Gateway's Service IP. Instead, it directs ExternalDNS to a specified Ingress resource to find the target LoadBalancer IP address.
+
 ## external-dns.alpha.kubernetes.io/internal-hostname
 
 Specifies the domain for the resource's DNS records that are for use from internal networks.
 
 For `Services` of type `LoadBalancer`, uses the `Service`'s `ClusterIP`.
 
-For `Pods`, uses the `Pod`'s `Status.PodIP`.
+For `Pods`, uses the `Pod`'s `Status.PodIP`, unless they are `hostNetwork: true` in which case the NodeExternalIP is used for IPv4 and NodeInternalIP for IPv6.
 
 ## external-dns.alpha.kubernetes.io/target
 
@@ -105,7 +185,6 @@ Some providers define their own annotations. Cloud-specific annotations have key
 |------------|------------------------------------------------|
 | AWS        | `external-dns.alpha.kubernetes.io/aws-`        |
 | CloudFlare | `external-dns.alpha.kubernetes.io/cloudflare-` |
-| IBM Cloud  | `external-dns.alpha.kubernetes.io/ibmcloud-`   |
 | Scaleway   | `external-dns.alpha.kubernetes.io/scw-`        |
 
 Additional annotations that are currently implemented only by AWS are:

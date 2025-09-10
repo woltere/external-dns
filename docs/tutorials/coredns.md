@@ -31,7 +31,8 @@ helm init
 ### Installing etcd
 
 [etcd operator](https://github.com/coreos/etcd-operator) is used to manage etcd clusters.
-```
+
+```sh
 helm install stable/etcd-operator --name my-etcd-op
 ```
 
@@ -45,7 +46,7 @@ kubectl apply -f https://raw.githubusercontent.com/coreos/etcd-operator/HEAD/exa
 
 In order to make CoreDNS work with etcd backend, values.yaml of the chart should be changed with corresponding configurations.
 
-```
+```sh
 wget https://raw.githubusercontent.com/helm/charts/HEAD/stable/coredns/values.yaml
 ```
 
@@ -132,7 +133,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --source=ingress
         - --provider=coredns
@@ -152,7 +153,10 @@ metadata:
   name: external-dns
 rules:
 - apiGroups: [""]
-  resources: ["services","endpoints","pods"]
+  resources: ["services","pods"]
+  verbs: ["get","watch","list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
   verbs: ["get","watch","list"]
 - apiGroups: ["extensions","networking.k8s.io"]
   resources: ["ingresses"]
@@ -199,7 +203,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --source=ingress
         - --provider=coredns

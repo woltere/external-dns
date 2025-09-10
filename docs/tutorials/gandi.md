@@ -22,6 +22,7 @@ Connect your `kubectl` client to the cluster you want to test ExternalDNS with.
 Then apply one of the following manifests file to deploy ExternalDNS.
 
 ### Manifest (for clusters without RBAC enabled)
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -41,7 +42,7 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -52,6 +53,7 @@ spec:
 ```
 
 ### Manifest (for clusters with RBAC enabled)
+
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -64,10 +66,13 @@ metadata:
   name: external-dns
 rules:
 - apiGroups: [""]
-  resources: ["services","endpoints","pods"]
+  resources: ["services","pods"]
+  verbs: ["get","watch","list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
   verbs: ["get","watch","list"]
 - apiGroups: ["extensions","networking.k8s.io"]
-  resources: ["ingresses"] 
+  resources: ["ingresses"]
   verbs: ["get","watch","list"]
 - apiGroups: [""]
   resources: ["nodes"]
@@ -105,7 +110,7 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --source=service # ingress is also possible
         - --domain-filter=example.com # (optional) limit to only example.com domains; change to match the zone created above.
@@ -114,7 +119,6 @@ spec:
         - name: GANDI_PAT
           value: "YOUR_GANDI_PAT"
 ```
-
 
 ## Deploying an Nginx Service
 
@@ -164,7 +168,7 @@ ExternalDNS uses this annotation to determine what services should be registered
 Create the deployment and service:
 
 ```console
-$ kubectl create -f nginx.yaml
+kubectl create -f nginx.yaml
 ```
 
 Depending where you run your service it can take a little while for your cloud provider to create an external IP for the service.
@@ -183,11 +187,11 @@ This should show the external IP address of the service as the A record for your
 
 Now that we have verified that ExternalDNS will automatically manage Gandi DNS records, we can delete the tutorial's example:
 
-```
-$ kubectl delete service -f nginx.yaml
-$ kubectl delete service -f externaldns.yaml
+```sh
+kubectl delete service -f nginx.yaml
+kubectl delete service -f externaldns.yaml
 ```
 
-# Additional options
+## Additional options
 
 If you're using organizations to separate your domains, you can pass the organization's ID in an environment variable called `GANDI_SHARING_ID` to get access to it.

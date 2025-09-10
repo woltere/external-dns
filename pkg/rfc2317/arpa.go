@@ -72,17 +72,18 @@ func CidrToInAddr(cidr string) (string, error) {
 	}
 
 	// Handle IPv4 Class-full and IPv6:
-	if total == 32 {
+	switch total {
+	case 32:
 		if bits%8 != 0 {
 			return "", fmt.Errorf("IPv4 mask must be multiple of 8 bits")
 		}
 		toTrim = (total - bits) / 8
-	} else if total == 128 {
+	case 128:
 		if bits%4 != 0 {
 			return "", fmt.Errorf("IPv6 mask must be multiple of 4 bits")
 		}
 		toTrim = (total - bits) / 4
-	} else {
+	default:
 		return "", fmt.Errorf("invalid address (not IPv4 or IPv6): %v", cidr)
 	}
 
@@ -97,7 +98,7 @@ func CidrToInAddr(cidr string) (string, error) {
 // reverseaddr returns the in-addr.arpa. or ip6.arpa. hostname of the IP
 // address addr suitable for rDNS (PTR) record lookup or an error if it fails
 // to parse the IP address.
-func reverseaddr(addr string) (arpa string, err error) {
+func reverseaddr(addr string) (string, error) {
 	ip := net.ParseIP(addr)
 	if ip == nil {
 		return "", &net.DNSError{Err: "unrecognized address", Name: addr}

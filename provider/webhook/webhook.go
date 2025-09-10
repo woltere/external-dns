@@ -25,11 +25,12 @@ import (
 	"net/url"
 
 	"sigs.k8s.io/external-dns/endpoint"
+	"sigs.k8s.io/external-dns/pkg/metrics"
 	"sigs.k8s.io/external-dns/plan"
 	"sigs.k8s.io/external-dns/provider"
 	webhookapi "sigs.k8s.io/external-dns/provider/webhook/api"
 
-	backoff "github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 )
@@ -40,49 +41,43 @@ const (
 )
 
 var (
-	recordsErrorsGauge = prometheus.NewGauge(
+	recordsErrorsGauge = metrics.NewGaugeWithOpts(
 		prometheus.GaugeOpts{
-			Namespace: "external_dns",
 			Subsystem: "webhook_provider",
 			Name:      "records_errors_total",
 			Help:      "Errors with Records method",
 		},
 	)
-	recordsRequestsGauge = prometheus.NewGauge(
+	recordsRequestsGauge = metrics.NewGaugeWithOpts(
 		prometheus.GaugeOpts{
-			Namespace: "external_dns",
 			Subsystem: "webhook_provider",
 			Name:      "records_requests_total",
 			Help:      "Requests with Records method",
 		},
 	)
-	applyChangesErrorsGauge = prometheus.NewGauge(
+	applyChangesErrorsGauge = metrics.NewGaugeWithOpts(
 		prometheus.GaugeOpts{
-			Namespace: "external_dns",
 			Subsystem: "webhook_provider",
 			Name:      "applychanges_errors_total",
 			Help:      "Errors with ApplyChanges method",
 		},
 	)
-	applyChangesRequestsGauge = prometheus.NewGauge(
+	applyChangesRequestsGauge = metrics.NewGaugeWithOpts(
 		prometheus.GaugeOpts{
-			Namespace: "external_dns",
 			Subsystem: "webhook_provider",
 			Name:      "applychanges_requests_total",
 			Help:      "Requests with ApplyChanges method",
 		},
 	)
-	adjustEndpointsErrorsGauge = prometheus.NewGauge(
+	adjustEndpointsErrorsGauge = metrics.NewGaugeWithOpts(
 		prometheus.GaugeOpts{
-			Namespace: "external_dns",
 			Subsystem: "webhook_provider",
 			Name:      "adjustendpoints_errors_total",
 			Help:      "Errors with AdjustEndpoints method",
 		},
 	)
-	adjustEndpointsRequestsGauge = prometheus.NewGauge(
+	adjustEndpointsRequestsGauge = metrics.NewGaugeWithOpts(
 		prometheus.GaugeOpts{
-			Namespace: "external_dns",
 			Subsystem: "webhook_provider",
 			Name:      "adjustendpoints_requests_total",
 			Help:      "Requests with AdjustEndpoints method",
@@ -93,16 +88,16 @@ var (
 type WebhookProvider struct {
 	client          *http.Client
 	remoteServerURL *url.URL
-	DomainFilter    endpoint.DomainFilter
+	DomainFilter    *endpoint.DomainFilter
 }
 
 func init() {
-	prometheus.MustRegister(recordsErrorsGauge)
-	prometheus.MustRegister(recordsRequestsGauge)
-	prometheus.MustRegister(applyChangesErrorsGauge)
-	prometheus.MustRegister(applyChangesRequestsGauge)
-	prometheus.MustRegister(adjustEndpointsErrorsGauge)
-	prometheus.MustRegister(adjustEndpointsRequestsGauge)
+	metrics.RegisterMetric.MustRegister(recordsErrorsGauge)
+	metrics.RegisterMetric.MustRegister(recordsRequestsGauge)
+	metrics.RegisterMetric.MustRegister(applyChangesErrorsGauge)
+	metrics.RegisterMetric.MustRegister(applyChangesRequestsGauge)
+	metrics.RegisterMetric.MustRegister(adjustEndpointsErrorsGauge)
+	metrics.RegisterMetric.MustRegister(adjustEndpointsRequestsGauge)
 }
 
 func NewWebhookProvider(u string) (*WebhookProvider, error) {
@@ -112,43 +107,28 @@ func NewWebhookProvider(u string) (*WebhookProvider, error) {
 	}
 
 	// negotiate API information
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set(acceptHeader, webhookapi.MediaTypeFormatAndVersion)
 
 	client := &http.Client{}
-	var resp *http.Response
-	err = backoff.Retry(func() error {
-		resp, err = client.Do(req)
-		if err != nil {
-			log.Debugf("Failed to connect to webhook: %v", err)
-			return err
-		}
-		// we currently only use 200 as success, but considering okay all 2XX for future usage
-		if resp.StatusCode >= 300 && resp.StatusCode < 500 {
-			return backoff.Permanent(fmt.Errorf("status code < 500"))
-		}
-		return nil
-	}, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), maxRetries))
 
+	resp, err := requestWithRetry(client, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to webhook: %v", err)
+		return nil, fmt.Errorf("failed to connect to webhook: %w", err)
 	}
-
-	contentType := resp.Header.Get(webhookapi.ContentTypeHeader)
-
 	// read the serialized DomainFilter from the response body and set it in the webhook provider struct
 	defer resp.Body.Close()
 
-	df := endpoint.DomainFilter{}
-	if err := json.NewDecoder(resp.Body).Decode(&df); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response body of DomainFilter: %v", err)
+	if ct := resp.Header.Get(webhookapi.ContentTypeHeader); ct != webhookapi.MediaTypeFormatAndVersion {
+		return nil, fmt.Errorf("wrong content type returned from server: %s", ct)
 	}
 
-	if contentType != webhookapi.MediaTypeFormatAndVersion {
-		return nil, fmt.Errorf("wrong content type returned from server: %s", contentType)
+	df := &endpoint.DomainFilter{}
+	if err := json.NewDecoder(resp.Body).Decode(df); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response body of DomainFilter: %w", err)
 	}
 
 	return &WebhookProvider{
@@ -158,28 +138,44 @@ func NewWebhookProvider(u string) (*WebhookProvider, error) {
 	}, nil
 }
 
+func requestWithRetry(client *http.Client, req *http.Request) (*http.Response, error) {
+	resp, err := backoff.Retry(context.Background(), func() (*http.Response, error) {
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Debugf("Failed to connect to webhook: %v", err)
+			return nil, err
+		}
+		// we currently only use 200 as success, but considering okay all 2XX for future usage
+		if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusInternalServerError {
+			return nil, backoff.Permanent(fmt.Errorf("status code < %d", http.StatusInternalServerError))
+		}
+		return resp, nil
+	}, backoff.WithMaxTries(maxRetries))
+	return resp, err
+}
+
 // Records will make a GET call to remoteServerURL/records and return the results
 func (p WebhookProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
-	recordsRequestsGauge.Inc()
+	recordsRequestsGauge.Gauge.Inc()
 	u := p.remoteServerURL.JoinPath("records").String()
 
-	req, err := http.NewRequest("GET", u, nil)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		recordsErrorsGauge.Inc()
+		recordsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to create request: %s", err.Error())
 		return nil, err
 	}
 	req.Header.Set(acceptHeader, webhookapi.MediaTypeFormatAndVersion)
 	resp, err := p.client.Do(req)
 	if err != nil {
-		recordsErrorsGauge.Inc()
+		recordsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to perform request: %s", err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		recordsErrorsGauge.Inc()
+		recordsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to get records with code %d", resp.StatusCode)
 		err := fmt.Errorf("failed to get records with code %d", resp.StatusCode)
 		if isRetryableError(resp.StatusCode) {
@@ -188,9 +184,9 @@ func (p WebhookProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, err
 		return nil, err
 	}
 
-	endpoints := []*endpoint.Endpoint{}
+	var endpoints []*endpoint.Endpoint
 	if err := json.NewDecoder(resp.Body).Decode(&endpoints); err != nil {
-		recordsErrorsGauge.Inc()
+		recordsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to decode response body: %s", err.Error())
 		return nil, err
 	}
@@ -198,20 +194,20 @@ func (p WebhookProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, err
 }
 
 // ApplyChanges will make a POST to remoteServerURL/records with the changes
-func (p WebhookProvider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	applyChangesRequestsGauge.Inc()
-	u := p.remoteServerURL.JoinPath("records").String()
+func (p WebhookProvider) ApplyChanges(_ context.Context, changes *plan.Changes) error {
+	applyChangesRequestsGauge.Gauge.Inc()
+	u := p.remoteServerURL.JoinPath(webhookapi.UrlRecords).String()
 
 	b := new(bytes.Buffer)
 	if err := json.NewEncoder(b).Encode(changes); err != nil {
-		applyChangesErrorsGauge.Inc()
+		applyChangesErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to encode changes: %s", err.Error())
 		return err
 	}
 
-	req, err := http.NewRequest("POST", u, b)
+	req, err := http.NewRequest(http.MethodPost, u, b)
 	if err != nil {
-		applyChangesErrorsGauge.Inc()
+		applyChangesErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to create request: %s", err.Error())
 		return err
 	}
@@ -220,14 +216,15 @@ func (p WebhookProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		applyChangesErrorsGauge.Inc()
+		applyChangesErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to perform request: %s", err.Error())
 		return err
 	}
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
-		applyChangesErrorsGauge.Inc()
+		applyChangesErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to apply changes with code %d", resp.StatusCode)
 		err := fmt.Errorf("failed to apply changes with code %d", resp.StatusCode)
 		if isRetryableError(resp.StatusCode) {
@@ -239,28 +236,28 @@ func (p WebhookProvider) ApplyChanges(ctx context.Context, changes *plan.Changes
 }
 
 // AdjustEndpoints will call the provider doing a POST on `/adjustendpoints` which will return a list of modified endpoints
-// based on a provider specific requirement.
+// based on a provider-specific requirement.
 // This method returns an empty slice in case there is a technical error on the provider's side so that no endpoints will be considered.
 func (p WebhookProvider) AdjustEndpoints(e []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
-	adjustEndpointsRequestsGauge.Inc()
-	endpoints := []*endpoint.Endpoint{}
-	u, err := url.JoinPath(p.remoteServerURL.String(), "adjustendpoints")
+	adjustEndpointsRequestsGauge.Gauge.Inc()
+	var endpoints []*endpoint.Endpoint
+	u, err := url.JoinPath(p.remoteServerURL.String(), webhookapi.UrlAdjustEndpoints)
 	if err != nil {
-		adjustEndpointsErrorsGauge.Inc()
+		adjustEndpointsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to join path, %s", err)
 		return nil, err
 	}
 
 	b := new(bytes.Buffer)
 	if err := json.NewEncoder(b).Encode(e); err != nil {
-		adjustEndpointsErrorsGauge.Inc()
+		adjustEndpointsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to encode endpoints, %s", err)
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", u, b)
+	req, err := http.NewRequest(http.MethodPost, u, b)
 	if err != nil {
-		adjustEndpointsErrorsGauge.Inc()
+		adjustEndpointsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to create new HTTP request, %s", err)
 		return nil, err
 	}
@@ -270,14 +267,14 @@ func (p WebhookProvider) AdjustEndpoints(e []*endpoint.Endpoint) ([]*endpoint.En
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		adjustEndpointsErrorsGauge.Inc()
+		adjustEndpointsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed executing http request, %s", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		adjustEndpointsErrorsGauge.Inc()
+		adjustEndpointsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to AdjustEndpoints with code %d", resp.StatusCode)
 		err := fmt.Errorf("failed to AdjustEndpoints with code  %d", resp.StatusCode)
 		if isRetryableError(resp.StatusCode) {
@@ -287,7 +284,7 @@ func (p WebhookProvider) AdjustEndpoints(e []*endpoint.Endpoint) ([]*endpoint.En
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&endpoints); err != nil {
-		adjustEndpointsErrorsGauge.Inc()
+		adjustEndpointsErrorsGauge.Gauge.Inc()
 		log.Debugf("Failed to decode response body: %s", err.Error())
 		return nil, err
 	}

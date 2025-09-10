@@ -3,7 +3,9 @@
 This tutorial describes how to setup ExternalDNS for usage in conjunction with a Headless service.
 
 ## Use cases
-The main use cases that inspired this feature is the necessity for fixed addressable hostnames with services, such as Kafka when trying to access them from outside the cluster. In this scenario, quite often, only the Node IP addresses are actually routable and as in systems like Kafka more direct connections are preferable.
+
+The main use cases that inspired this feature is the necessity for fixed addressable hostnames with services, such as Kafka when trying to access them from outside the cluster.
+In this scenario, quite often, only the Node IP addresses are actually routable and as in systems like Kafka more direct connections are preferable.
 
 ## Setup
 
@@ -12,7 +14,9 @@ We will go through a small example of deploying a simple Kafka with use of a hea
 ### External DNS
 
 A simple deploy could look like this:
+
 ### Manifest (for clusters without RBAC enabled)
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -31,19 +35,20 @@ spec:
     spec:
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --log-level=debug
         - --source=service
         - --source=ingress
         - --namespace=dev
-        - --domain-filter=example.org. 
+        - --domain-filter=example.org.
         - --provider=aws
         - --registry=txt
         - --txt-owner-id=dev.example.org
 ```
 
 ### Manifest (for clusters with RBAC enabled)
+
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -56,10 +61,13 @@ metadata:
   name: external-dns
 rules:
 - apiGroups: [""]
-  resources: ["services","endpoints","pods"]
+  resources: ["services","pods"]
+  verbs: ["get","watch","list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
   verbs: ["get","watch","list"]
 - apiGroups: ["extensions","networking.k8s.io"]
-  resources: ["ingresses"] 
+  resources: ["ingresses"]
   verbs: ["get","watch","list"]
 - apiGroups: [""]
   resources: ["nodes"]
@@ -96,18 +104,17 @@ spec:
       serviceAccountName: external-dns
       containers:
       - name: external-dns
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --log-level=debug
         - --source=service
         - --source=ingress
         - --namespace=dev
-        - --domain-filter=example.org. 
+        - --domain-filter=example.org.
         - --provider=aws
         - --registry=txt
         - --txt-owner-id=dev.example.org
 ```
-
 
 ### Kafka Stateful Set
 
@@ -127,7 +134,7 @@ spec:
         component: kafka
     spec:
       containers:
-      - name:  kafka        
+      - name:  kafka
         image: confluent/kafka
         ports:
         - containerPort: 9092
@@ -155,14 +162,15 @@ spec:
         requests:
           storage:  500Gi
 ```
+
 Very important here, is to set the `hostPort`(only works if the PodSecurityPolicy allows it)! and in case your app requires an actual hostname inside the container, unlike Kafka, which can advertise on another address, you have to set the hostname yourself.
 
 ### Headless Service
 
 Now we need to define a headless service to use to expose the Kafka pods. There are generally two approaches to use expose the nodeport of a Headless service:
 
-1. Add `--fqdn-template={{name}}.example.org`
-2. Use a full annotation 
+1. Add `--fqdn-template={{ .Name }}.example.org`
+2. Use a full annotation
 
 If you go with #1, you just need to define the headless service, here is an example of the case #2:
 
@@ -181,21 +189,25 @@ spec:
   selector:
     component: kafka
 ```
-This will create 3 dns records:
-```
-kafka-0.example.org
-kafka-1.example.org
-kafka-2.example.org
+
+This will create 4 dns records:
+
+```sh
+kafka-0.example.org IP-0
+kafka-1.example.org IP-1
+kafka-2.example.org IP-2
+example.org IP-0,IP-1,IP-2
 ```
 
-If you set `--fqdn-template={{name}}.example.org` you can omit the annotation.
-Generally it is a better approach to use  `--fqdn-template={{name}}.example.org`, because then
-you would get the service name inside the generated A records:
+> !Notice rood domain with records `example.org`
 
-```
-kafka-0.ksvc.example.org
-kafka-1.ksvc.example.org
-kafka-2.ksvc.example.org
+If you set `--fqdn-template={{ .Name }}.example.org` you can omit the annotation.
+
+```sh
+kafka-0.ksvc.example.org IP-0
+kafka-1.ksvc.example.org IP-1
+kafka-2.ksvc.example.org IP-2
+ksvc.example.org IP-0,IP-1,IP-2
 ```
 
 #### Using pods' HostIPs as targets

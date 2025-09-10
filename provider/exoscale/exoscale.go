@@ -41,7 +41,7 @@ type EgoscaleClientI interface {
 // ExoscaleProvider initialized as dns provider with no records
 type ExoscaleProvider struct {
 	provider.BaseProvider
-	domain         endpoint.DomainFilter
+	domain         *endpoint.DomainFilter
 	client         EgoscaleClientI
 	apiEnv         string
 	apiZone        string
@@ -181,7 +181,7 @@ func (ep *ExoscaleProvider) ApplyChanges(ctx context.Context, changes *plan.Chan
 	}
 
 	for _, epoint := range changes.UpdateOld {
-		// Since Exoscale "Patches", we ignore UpdateOld
+		// Since Exoscale "Patches", we've ignored UpdateOld
 		// We leave this logging here for information
 		log.Debugf("UPDATE-OLD (ignored) for epoint: %+v", epoint)
 	}
@@ -235,10 +235,7 @@ func (ep *ExoscaleProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, 
 		}
 
 		for _, record := range records {
-			switch *record.Type {
-			case "A", "CNAME", "TXT":
-				break
-			default:
+			if *record.Type != endpoint.RecordTypeA && *record.Type != endpoint.RecordTypeCNAME && *record.Type != endpoint.RecordTypeTXT {
 				continue
 			}
 
@@ -252,7 +249,7 @@ func (ep *ExoscaleProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, 
 }
 
 // ExoscaleWithDomain modifies the domain on which dns zones are filtered
-func ExoscaleWithDomain(domainFilter endpoint.DomainFilter) ExoscaleOption {
+func ExoscaleWithDomain(domainFilter *endpoint.DomainFilter) ExoscaleOption {
 	return func(p *ExoscaleProvider) {
 		p.domain = domainFilter
 	}
@@ -295,9 +292,8 @@ func (f *zoneFilter) Zones(zones map[string]string) map[string]string {
 
 // EndpointZoneID determines zoneID for endpoint from map[zoneID]zoneName by taking longest suffix zoneName match in endpoint DNSName
 // returns empty string if no matches are found
-func (f *zoneFilter) EndpointZoneID(endpoint *endpoint.Endpoint, zones map[string]string) (zoneID string, name string) {
-	var matchZoneID string
-	var matchZoneName string
+func (f *zoneFilter) EndpointZoneID(endpoint *endpoint.Endpoint, zones map[string]string) (string, string) {
+	var matchZoneID, matchZoneName, name string
 	for zoneID, zoneName := range zones {
 		if strings.HasSuffix(endpoint.DNSName, "."+zoneName) && len(zoneName) > len(matchZoneName) {
 			matchZoneName = zoneName
@@ -310,10 +306,10 @@ func (f *zoneFilter) EndpointZoneID(endpoint *endpoint.Endpoint, zones map[strin
 
 func merge(updateOld, updateNew []*endpoint.Endpoint) []*endpoint.Endpoint {
 	findMatch := func(template *endpoint.Endpoint) *endpoint.Endpoint {
-		for _, new := range updateNew {
-			if template.DNSName == new.DNSName &&
-				template.RecordType == new.RecordType {
-				return new
+		for _, record := range updateNew {
+			if template.DNSName == record.DNSName &&
+				template.RecordType == record.RecordType {
+				return record
 			}
 		}
 		return nil
@@ -323,7 +319,7 @@ func merge(updateOld, updateNew []*endpoint.Endpoint) []*endpoint.Endpoint {
 	for _, old := range updateOld {
 		matchingNew := findMatch(old)
 		if matchingNew == nil {
-			// no match, shouldn't happen
+			// no match shouldn't happen
 			continue
 		}
 

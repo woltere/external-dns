@@ -1,6 +1,6 @@
 # Gateway sources
 
-The gateway-grcproute, gateway-httproute, gateway-tcproute, gateway-tlsroute, and gateway-udproute
+The gateway-grpcroute, gateway-httproute, gateway-tcproute, gateway-tlsroute, and gateway-udproute
 sources create DNS entries based on their respective `gateway.networking.k8s.io` resources.
 
 ## Filtering the Routes considered
@@ -43,6 +43,39 @@ Matching Gateways are discovered by iterating over the \*Route's `status.parents
 - Ignores parents with a `parentRef.group` other than
   `gateway.networking.k8s.io` or a `parentRef.kind` other than `Gateway`.
 
+- If the `--gateway-name` flag was specified, ignores parents with a `parentRef.name` other than the
+  specified value.
+
+  For example, given the following HTTPRoute:
+
+    ```yaml
+    apiVersion: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    metadata:
+      name: echo
+    spec:
+      hostnames:
+        - echoserver.example.org
+      parentRefs:
+        - group: networking.k8s.io
+          kind: Gateway
+          name: internal
+    ---
+    apiVersion: gateway.networking.k8s.io/v1
+    kind: HTTPRoute
+    metadata:
+      name: echo2
+    spec:
+      hostnames:
+        - echoserver2.example.org
+      parentRefs:
+        - group: networking.k8s.io
+          kind: Gateway
+          name: external
+    ```
+
+  And using the `--gateway-name=external` flag, only the `echo2` HTTPRoute will be considered for DNS entries.
+
 - If the `--gateway-namespace` flag was specified, ignores parents with a `parentRef.namespace` other
   than the specified value.
 
@@ -83,19 +116,18 @@ The targets from each parent Gateway matching the \*Route are then combined and 
 
 ## Dualstack Routes
 
-Gateway resources may be served from an external-loadbalancer which may support both IPv4 and "dualstack" (both IPv4 and IPv6) interfaces.
-External DNS Controller uses the `external-dns.alpha.kubernetes.io/dualstack` annotation to determine this. If this annotation is
-set to `true` then ExternalDNS will create two records (one A record
-and one AAAA record) for each hostname associated with the Route resource.
+Gateway resources may be served from an external-loadbalancer which may support
+both IPv4 and "dualstack" (both IPv4 and IPv6) interfaces. When using the AWS
+Route53 provider, External DNS Controller will always create both A and AAAA
+alias DNS records by default, regardless of whether the load balancer is dual
+stack or not.
 
-Example:
+## Example
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  annotations:
-    external-dns.alpha.kubernetes.io/dualstack: "true"
   name: echo
 spec:
   hostnames:
@@ -112,7 +144,3 @@ spec:
             type: PathPrefix
             value: /echo
 ```
-
-The above HTTPRoute resource is backed by a dualstack Gateway.
-ExternalDNS will create both an A `echoserver.example.org` record and
-an AAAA record of the same name, that each are aliases for the same LB.

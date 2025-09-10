@@ -1,8 +1,10 @@
 # Gloo Proxy Source
+
 This tutorial describes how to configure ExternalDNS to use the Gloo Proxy source.
 It is meant to supplement the other provider-specific setup tutorials.
 
-### Manifest (for clusters without RBAC enabled)
+## Manifest (for clusters without RBAC enabled)
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -22,7 +24,7 @@ spec:
       containers:
       - name: external-dns
         # update this to the desired external-dns version
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --source=gloo-proxy
         - --gloo-namespace=custom-gloo-system # gloo system namespace. Specify multiple times for multiple namespaces. Omit to use the default (gloo-system)
@@ -31,7 +33,8 @@ spec:
         - --txt-owner-id=my-identifier
 ```
 
-### Manifest (for clusters with RBAC enabled)
+## Manifest (for clusters with RBAC enabled)
+
 Could be change if you have mulitple sources
 
 ```yaml
@@ -46,7 +49,10 @@ metadata:
   name: external-dns
 rules:
 - apiGroups: [""]
-  resources: ["services","endpoints","pods"]
+  resources: ["services","pods"]
+  verbs: ["get","watch","list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
   verbs: ["get","watch","list"]
 - apiGroups: [""]
   resources: ["nodes"]
@@ -90,7 +96,7 @@ spec:
       containers:
       - name: external-dns
         # update this to the desired external-dns version
-        image: registry.k8s.io/external-dns/external-dns:v0.15.1
+        image: registry.k8s.io/external-dns/external-dns:v0.19.0
         args:
         - --source=gloo-proxy
         - --gloo-namespace=custom-gloo-system # gloo system namespace. Specify multiple times for multiple namespaces. Omit to use the default (gloo-system)
@@ -98,4 +104,3 @@ spec:
         - --registry=txt
         - --txt-owner-id=my-identifier
 ```
-

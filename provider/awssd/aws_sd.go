@@ -35,7 +35,10 @@ import (
 )
 
 const (
-	sdDefaultRecordTTL = 300
+	defaultTTL = 300
+
+	// https://github.com/aws/aws-sdk-go-v2/blob/cf8509382340d6afdc93612550d56d685181bbb3/service/servicediscovery/api_op_ListServices.go#L42
+	maxResults = 100
 
 	sdNamespaceTypePublic  = "public"
 	sdNamespaceTypePrivate = "private"
@@ -73,9 +76,9 @@ type AWSSDProvider struct {
 	client AWSSDClient
 	dryRun bool
 	// only consider namespaces ending in this suffix
-	namespaceFilter endpoint.DomainFilter
+	namespaceFilter *endpoint.DomainFilter
 	// filter namespace by type (private or public)
-	namespaceTypeFilter sdtypes.NamespaceFilter
+	namespaceTypeFilter []sdtypes.NamespaceFilter
 	// enables service without instances cleanup
 	cleanEmptyService bool
 	// filter services for removal
@@ -85,7 +88,7 @@ type AWSSDProvider struct {
 }
 
 // NewAWSSDProvider initializes a new AWS Cloud Map based Provider.
-func NewAWSSDProvider(domainFilter endpoint.DomainFilter, namespaceType string, dryRun, cleanEmptyService bool, ownerID string, tags map[string]string, client AWSSDClient) (*AWSSDProvider, error) {
+func NewAWSSDProvider(domainFilter *endpoint.DomainFilter, namespaceType string, dryRun, cleanEmptyService bool, ownerID string, tags map[string]string, client AWSSDClient) (*AWSSDProvider, error) {
 	p := &AWSSDProvider{
 		client:              client,
 		dryRun:              dryRun,
@@ -99,25 +102,32 @@ func NewAWSSDProvider(domainFilter endpoint.DomainFilter, namespaceType string, 
 	return p, nil
 }
 
-// newSdNamespaceFilter initialized AWS SD Namespace Filter based on given string config
-func newSdNamespaceFilter(namespaceTypeConfig string) sdtypes.NamespaceFilter {
+// newSdNamespaceFilter returns NamespaceFilter based on the given namespace type configuration.
+// If the config is "public", it filters for public namespaces; if "private", for private namespaces.
+// For any other value (including empty), it returns filters for both public and private namespaces.
+// ref: https://docs.aws.amazon.com/cloud-map/latest/api/API_ListNamespaces.html
+func newSdNamespaceFilter(namespaceTypeConfig string) []sdtypes.NamespaceFilter {
 	switch namespaceTypeConfig {
 	case sdNamespaceTypePublic:
-		return sdtypes.NamespaceFilter{
-			Name:   sdtypes.NamespaceFilterNameType,
-			Values: []string{string(sdtypes.NamespaceTypeDnsPublic)},
+		return []sdtypes.NamespaceFilter{
+			{
+				Name:   sdtypes.NamespaceFilterNameType,
+				Values: []string{string(sdtypes.NamespaceTypeDnsPublic)},
+			},
 		}
 	case sdNamespaceTypePrivate:
-		return sdtypes.NamespaceFilter{
-			Name:   sdtypes.NamespaceFilterNameType,
-			Values: []string{string(sdtypes.NamespaceTypeDnsPrivate)},
+		return []sdtypes.NamespaceFilter{
+			{
+				Name:   sdtypes.NamespaceFilterNameType,
+				Values: []string{string(sdtypes.NamespaceTypeDnsPrivate)},
+			},
 		}
 	default:
-		return sdtypes.NamespaceFilter{}
+		return []sdtypes.NamespaceFilter{}
 	}
 }
 
-// awsTags converts user supplied tags to AWS format
+// awsTags converts user-supplied tags to AWS format
 func awsTags(tags map[string]string) []sdtypes.Tag {
 	awsTags := make([]sdtypes.Tag, 0, len(tags))
 	for k, v := range tags {
@@ -127,11 +137,13 @@ func awsTags(tags map[string]string) []sdtypes.Tag {
 }
 
 // Records returns list of all endpoints.
-func (p *AWSSDProvider) Records(ctx context.Context) (endpoints []*endpoint.Endpoint, err error) {
+func (p *AWSSDProvider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
 	namespaces, err := p.ListNamespaces(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	endpoints := make([]*endpoint.Endpoint, 0)
 
 	for _, ns := range namespaces {
 		services, err := p.ListServicesByNamespaceID(ctx, ns.Id)
@@ -155,6 +167,11 @@ func (p *AWSSDProvider) Records(ctx context.Context) (endpoints []*endpoint.Endp
 				continue
 			}
 
+			if srv.Description == nil {
+				log.Warnf("Skipping service %q as owner id not configured", *srv.Name)
+				continue
+			}
+
 			endpoints = append(endpoints, p.instancesToEndpoint(ns, srv, resp.Instances))
 		}
 	}
@@ -167,6 +184,7 @@ func (p *AWSSDProvider) instancesToEndpoint(ns *sdtypes.NamespaceSummary, srv *s
 	recordName := *srv.Name + "." + *ns.Name
 
 	labels := endpoint.NewLabels()
+
 	labels[endpoint.AWSSDDescriptionLabel] = *srv.Description
 
 	newEndpoint := &endpoint.Endpoint{
@@ -222,13 +240,6 @@ func (p *AWSSDProvider) ApplyChanges(ctx context.Context, changes *plan.Changes)
 		return err
 	}
 
-	// Deletes must be executed first to support update case.
-	// When just list of targets is updated `[1.2.3.4] -> [1.2.3.4, 1.2.3.5]` it is translated to:
-	// ```
-	// deletes = [1.2.3.4]
-	// creates = [1.2.3.4, 1.2.3.5]
-	// ```
-	// then when deletes are executed after creates it will miss the `1.2.3.4` instance.
 	err = p.submitDeletes(ctx, namespaces, changes.Delete)
 	if err != nil {
 		return err
@@ -242,17 +253,32 @@ func (p *AWSSDProvider) ApplyChanges(ctx context.Context, changes *plan.Changes)
 	return nil
 }
 
-func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) (creates []*endpoint.Endpoint, deletes []*endpoint.Endpoint) {
+func (p *AWSSDProvider) updatesToCreates(changes *plan.Changes) ([]*endpoint.Endpoint, []*endpoint.Endpoint) {
 	updateNewMap := map[string]*endpoint.Endpoint{}
 	for _, e := range changes.UpdateNew {
 		updateNewMap[e.DNSName] = e
 	}
 
+	var creates, deletes []*endpoint.Endpoint
+
 	for _, old := range changes.UpdateOld {
 		current := updateNewMap[old.DNSName]
 
 		if !old.Targets.Same(current.Targets) {
-			// when targets differ the old instances need to be de-registered first
+			currentTargetsMap := make(map[string]struct{}, len(current.Targets))
+			for _, newTarget := range current.Targets {
+				currentTargetsMap[newTarget] = struct{}{}
+			}
+
+			// If targets changed, only deregister removed targets (i.e. in `UpdateOld` but not in `UpdateNew`)
+			targetsToRemove := make(endpoint.Targets, 0)
+			for _, oldTarget := range old.Targets {
+				if _, found := currentTargetsMap[oldTarget]; !found {
+					targetsToRemove = append(targetsToRemove, oldTarget)
+				}
+			}
+
+			old.Targets = targetsToRemove
 			deletes = append(deletes, old)
 		}
 
@@ -282,7 +308,7 @@ func (p *AWSSDProvider) submitCreates(ctx context.Context, namespaces []*sdtypes
 				if err != nil {
 					return err
 				}
-				// update local list of services
+				// update a local list of services
 				services[*srv.Name] = srv
 			} else if ch.RecordTTL.IsConfigured() && *srv.DnsConfig.DnsRecords[0].TTL != int64(ch.RecordTTL) {
 				// update service when TTL differ
@@ -335,7 +361,7 @@ func (p *AWSSDProvider) ListNamespaces(ctx context.Context) ([]*sdtypes.Namespac
 	namespaces := make([]*sdtypes.NamespaceSummary, 0)
 
 	paginator := sd.NewListNamespacesPaginator(p.client, &sd.ListNamespacesInput{
-		Filters: []sdtypes.NamespaceFilter{p.namespaceTypeFilter},
+		Filters: p.namespaceTypeFilter,
 	})
 	for paginator.HasMorePages() {
 		resp, err := paginator.NextPage(ctx)
@@ -354,7 +380,7 @@ func (p *AWSSDProvider) ListNamespaces(ctx context.Context) ([]*sdtypes.Namespac
 	return namespaces, nil
 }
 
-// ListServicesByNamespaceID returns list of services in given namespace.
+// ListServicesByNamespaceID returns a list of services in a given namespace.
 func (p *AWSSDProvider) ListServicesByNamespaceID(ctx context.Context, namespaceID *string) (map[string]*sdtypes.Service, error) {
 	services := make([]sdtypes.ServiceSummary, 0)
 
@@ -363,7 +389,7 @@ func (p *AWSSDProvider) ListServicesByNamespaceID(ctx context.Context, namespace
 			Name:   sdtypes.ServiceFilterNameNamespaceId,
 			Values: []string{*namespaceID},
 		}},
-		MaxResults: aws.Int32(100),
+		MaxResults: aws.Int32(maxResults),
 	})
 	for paginator.HasMorePages() {
 		resp, err := paginator.NextPage(ctx)
@@ -401,86 +427,93 @@ func (p *AWSSDProvider) CreateService(ctx context.Context, namespaceID *string, 
 	srvType := p.serviceTypeFromEndpoint(ep)
 	routingPolicy := p.routingPolicyFromEndpoint(ep)
 
-	ttl := int64(sdDefaultRecordTTL)
+	ttl := int64(defaultTTL)
 	if ep.RecordTTL.IsConfigured() {
 		ttl = int64(ep.RecordTTL)
 	}
 
-	if !p.dryRun {
-		out, err := p.client.CreateService(ctx, &sd.CreateServiceInput{
-			Name:        srvName,
-			Description: aws.String(ep.Labels[endpoint.AWSSDDescriptionLabel]),
-			DnsConfig: &sdtypes.DnsConfig{
-				RoutingPolicy: routingPolicy,
-				DnsRecords: []sdtypes.DnsRecord{{
-					Type: srvType,
-					TTL:  aws.Int64(ttl),
-				}},
-			},
-			NamespaceId: namespaceID,
-			Tags:        p.tags,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		return out.Service, nil
+	if p.dryRun {
+		// return a mock service summary in case of a dry run
+		return &sdtypes.Service{Id: aws.String("dry-run-service"), Name: aws.String("dry-run-service")}, nil
 	}
 
-	// return mock service summary in case of dry run
-	return &sdtypes.Service{Id: aws.String("dry-run-service"), Name: aws.String("dry-run-service")}, nil
+	out, err := p.client.CreateService(ctx, &sd.CreateServiceInput{
+		Name:        srvName,
+		Description: aws.String(ep.Labels[endpoint.AWSSDDescriptionLabel]),
+		DnsConfig: &sdtypes.DnsConfig{
+			RoutingPolicy: routingPolicy,
+			DnsRecords: []sdtypes.DnsRecord{{
+				Type: srvType,
+				TTL:  aws.Int64(ttl),
+			}},
+		},
+		NamespaceId: namespaceID,
+		Tags:        p.tags,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return out.Service, nil
 }
 
-// UpdateService updates the specified service with information from provided endpoint.
+// UpdateService updates the specified service with information from the provided endpoint.
 func (p *AWSSDProvider) UpdateService(ctx context.Context, service *sdtypes.Service, ep *endpoint.Endpoint) error {
 	log.Infof("Updating service \"%s\"", *service.Name)
 
 	srvType := p.serviceTypeFromEndpoint(ep)
 
-	ttl := int64(sdDefaultRecordTTL)
+	ttl := int64(defaultTTL)
 	if ep.RecordTTL.IsConfigured() {
 		ttl = int64(ep.RecordTTL)
 	}
 
-	if !p.dryRun {
-		_, err := p.client.UpdateService(ctx, &sd.UpdateServiceInput{
-			Id: service.Id,
-			Service: &sdtypes.ServiceChange{
-				Description: aws.String(ep.Labels[endpoint.AWSSDDescriptionLabel]),
-				DnsConfig: &sdtypes.DnsConfigChange{
-					DnsRecords: []sdtypes.DnsRecord{{
-						Type: srvType,
-						TTL:  aws.Int64(ttl),
-					}},
-				},
-			},
-		})
-		if err != nil {
-			return err
-		}
+	if p.dryRun {
+		return nil
 	}
 
-	return nil
+	_, err := p.client.UpdateService(ctx, &sd.UpdateServiceInput{
+		Id: service.Id,
+		Service: &sdtypes.ServiceChange{
+			Description: aws.String(ep.Labels[endpoint.AWSSDDescriptionLabel]),
+			DnsConfig: &sdtypes.DnsConfigChange{
+				DnsRecords: []sdtypes.DnsRecord{{
+					Type: srvType,
+					TTL:  aws.Int64(ttl),
+				}},
+			},
+		},
+	})
+	return err
 }
 
 // DeleteService deletes empty Service from AWS API if its owner id match
 func (p *AWSSDProvider) DeleteService(ctx context.Context, service *sdtypes.Service) error {
 	log.Debugf("Check if service \"%s\" owner id match and it can be deleted", *service.Name)
-	if !p.dryRun && p.cleanEmptyService {
-		// convert ownerID string to service description format
-		label := endpoint.NewLabels()
-		label[endpoint.OwnerLabelKey] = p.ownerID
-		label[endpoint.AWSSDDescriptionLabel] = label.SerializePlain(false)
 
-		if strings.HasPrefix(*service.Description, label[endpoint.AWSSDDescriptionLabel]) {
-			log.Infof("Deleting service \"%s\"", *service.Name)
-			_, err := p.client.DeleteService(ctx, &sd.DeleteServiceInput{
-				Id: aws.String(*service.Id),
-			})
-			return err
-		}
-		log.Debugf("Skipping service removal %s because owner id does not match, found: \"%s\", required: \"%s\"", *service.Name, *service.Description, label[endpoint.AWSSDDescriptionLabel])
+	if p.dryRun || !p.cleanEmptyService {
+		return nil
 	}
+
+	// convert ownerID string to the service description format
+	label := endpoint.NewLabels()
+	label[endpoint.OwnerLabelKey] = p.ownerID
+	label[endpoint.AWSSDDescriptionLabel] = label.SerializePlain(false)
+
+	if service.Description == nil {
+		log.Debugf("Skipping service removal %q because owner id (service.Description) not set, when should be %q", *service.Name, label[endpoint.AWSSDDescriptionLabel])
+		return nil
+	}
+
+	if strings.HasPrefix(*service.Description, label[endpoint.AWSSDDescriptionLabel]) {
+		log.Infof("Deleting service \"%s\"", *service.Name)
+		_, err := p.client.DeleteService(ctx, &sd.DeleteServiceInput{
+			Id: aws.String(*service.Id),
+		})
+		return err
+	}
+	log.Debugf("Skipping service removal %q because owner id does not match, found: %q, required: %q", *service.Name, *service.Description, label[endpoint.AWSSDDescriptionLabel])
+
 	return nil
 }
 
@@ -596,12 +629,10 @@ func matchingNamespaces(hostname string, namespaces []*sdtypes.NamespaceSummary)
 	return matchingNamespaces
 }
 
-// parse hostname to namespace (domain) and service
-func (p *AWSSDProvider) parseHostname(hostname string) (namespace string, service string) {
+// parseHostname parse hostname to namespace (domain) and service
+func (p *AWSSDProvider) parseHostname(hostname string) (string, string) {
 	parts := strings.Split(hostname, ".")
-	service = parts[0]
-	namespace = strings.Join(parts[1:], ".")
-	return
+	return strings.Join(parts[1:], "."), parts[0]
 }
 
 // determine service routing policy based on endpoint type
@@ -613,7 +644,7 @@ func (p *AWSSDProvider) routingPolicyFromEndpoint(ep *endpoint.Endpoint) sdtypes
 	return sdtypes.RoutingPolicyWeighted
 }
 
-// determine service type (A, AAAA, CNAME) from given endpoint
+// determine the service type (A, AAAA, CNAME) from a given endpoint
 func (p *AWSSDProvider) serviceTypeFromEndpoint(ep *endpoint.Endpoint) sdtypes.RecordType {
 	switch ep.RecordType {
 	case endpoint.RecordTypeCNAME:

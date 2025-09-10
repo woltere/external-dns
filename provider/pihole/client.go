@@ -28,9 +28,10 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/linki/instrumented_http"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/html"
+
+	extdnshttp "sigs.k8s.io/external-dns/pkg/http"
 
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/provider"
@@ -60,10 +61,8 @@ func newPiholeClient(cfg PiholeConfig) (piholeAPI, error) {
 	}
 
 	// Setup a persistent cookiejar for storing PHP session information
-	jar, err := cookiejar.New(&cookiejar.Options{})
-	if err != nil {
-		return nil, err
-	}
+	// This call will never return an error
+	jar, _ := cookiejar.New(&cookiejar.Options{})
 	// Setup an HTTP client using the cookiejar
 	httpClient := &http.Client{
 		Jar: jar,
@@ -73,7 +72,8 @@ func newPiholeClient(cfg PiholeConfig) (piholeAPI, error) {
 			},
 		},
 	}
-	cl := instrumented_http.NewClient(httpClient, &instrumented_http.Callbacks{})
+
+	cl := extdnshttp.NewInstrumentedClient(httpClient)
 
 	p := &piholeClient{
 		cfg:        cfg,

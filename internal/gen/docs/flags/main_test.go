@@ -1,5 +1,5 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2025 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -73,7 +73,8 @@ func TestFlagsMdUpToDate(t *testing.T) {
 	flags := computeFlags()
 	actual, err := flags.generateMarkdownTable()
 	assert.NoError(t, err)
-	assert.True(t, len(expected) == len(actual), "expected file '%s' to be up to date. execute 'make generate-flags-documentation", fileName)
+	actual = actual + "\n"
+	assert.Len(t, actual, len(expected), "expected file '%s' to be up to date. execute 'make generate-flags-documentation", fileName)
 }
 
 func TestFlagsMdExtraFlagAdded(t *testing.T) {
